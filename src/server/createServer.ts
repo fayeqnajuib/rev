@@ -660,7 +660,7 @@ const registerConfiguredAnalysisTools = (
     webNetworkCapture,
   }: ServerToolContext,
   android: AndroidAnalysisPort,
-  wasmArtifact: Pick<WasmArtifactService, "inspect" | "close">,
+  wasmArtifact: Pick<WasmArtifactService, "inspect" | "validate" | "close">,
   evmInterface: EvmInterfaceService,
   jeb: JebAnalysisPort,
   firmwareAnalysis: FirmwareAnalysisService,
