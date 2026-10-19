@@ -1,6 +1,6 @@
 import type { EvidenceMcpServer } from "./EvidenceMcpServer.js";
 
-import { inspectAnalysisView } from "../application/analysisView/AnalysisViewService.js";
+import { inspectAnalysisViewWithFiles } from "../application/analysisView/AnalysisViewService.js";
 import type { EvidenceLookup } from "../application/EvidenceInputResolver.js";
 import type { EvidenceWriter } from "../application/investigation/InvestigationRecordPort.js";
 import { toolContract } from "../contracts/toolContracts.js";
@@ -24,7 +24,7 @@ export const registerAnalysisViewTool = (
   const registration = toolRegistrationOptions(contract);
   const handler = createEvidenceToolHandler(
     server,
-    (input) => Promise.resolve(inspectAnalysisView(input, evidenceById)),
+    (input) => inspectAnalysisViewWithFiles(input, evidenceById),
     logger,
     recordEvidence,
     withAdmittedAnalysis,

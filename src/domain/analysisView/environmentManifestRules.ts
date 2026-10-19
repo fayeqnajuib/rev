@@ -9,6 +9,7 @@ export const TEMPLATE_RULES = [
   "after-uid-literal",
   "opaque-token",
   "sibling-variance",
+  "sibling-pair-variance",
 ] as const;
 export type TemplateRule = (typeof TEMPLATE_RULES)[number];
 export type ManifestRule = RouteRule | TemplateRule;
@@ -287,6 +288,98 @@ const mergeSiblingVariance = (groups: readonly ToolGroup[]): ToolGroup[] => {
   return [...current, ...beyondLimit];
 };
 
+/** Fewest distinct literal pairs that make two adjacent positions one templated pair. */
+export const SIBLING_PAIR_MINIMUM = 3;
+
+/** Both positions are literals that are neither stop words nor versions, right after a plural literal. */
+const pairCandidate = (group: ToolGroup, position: number): boolean => {
+  const previous = group.parts[position - 1];
+  const first = group.parts[position];
+  const second = group.parts[position + 1];
+  return (
+    previous?.kind === "literal" &&
+    previous.value.endsWith("s") &&
+    !STOP_WORDS.has(previous.value) &&
+    first?.kind === "literal" &&
+    second?.kind === "literal" &&
+    [first.value, second.value].every(
+      (value) => !STOP_WORDS.has(value) && !VERSION_TOKEN.test(value),
+    )
+  );
+};
+
+/** Merge one bucket when its pairs are distinct enough and both positions vary; otherwise keep its tools. */
+const mergePairBucket = (
+  bucket: readonly ToolGroup[],
+  position: number,
+): ToolGroup[] => {
+  const pairs = new Set(
+    bucket.map((group) =>
+      compositeKey([
+        literalAt(group, position),
+        literalAt(group, position + 1),
+      ]),
+    ),
+  );
+  const firsts = new Set(bucket.map((group) => literalAt(group, position)));
+  const seconds = new Set(
+    bucket.map((group) => literalAt(group, position + 1)),
+  );
+  if (pairs.size < SIBLING_PAIR_MINIMUM || firsts.size < 2 || seconds.size < 2)
+    return [...bucket];
+  const first = earliest(bucket);
+  const shape = withParts(
+    first,
+    first.parts.map((part, index) =>
+      index === position || index === position + 1
+        ? param("sibling-pair-variance", [literalAt(first, index)])
+        : part,
+    ),
+  );
+  return [
+    mergeGroups(
+      bucket.map((group) => (group === first ? shape : group)),
+      shape,
+    ),
+  ];
+};
+
+/** Merge groups that differ in two adjacent literals after a plural literal, such as `/repos/{owner}/{repo}/…`. */
+const mergeSiblingPairs = (groups: readonly ToolGroup[]): ToolGroup[] => {
+  const beyondLimit = groups.filter(
+    (group) => group.parts.length > SIBLING_VARIANCE_SEGMENT_LIMIT,
+  );
+  let current = groups.filter(
+    (group) => group.parts.length <= SIBLING_VARIANCE_SEGMENT_LIMIT,
+  );
+  const longest = Math.max(0, ...current.map((group) => group.parts.length));
+  for (let position = 2; position + 1 < longest; position += 1) {
+    const buckets = new Map<string, ToolGroup[]>();
+    const output: ToolGroup[] = [];
+    for (const group of current) {
+      if (!pairCandidate(group, position)) {
+        output.push(group);
+        continue;
+      }
+      const key = compositeKey([
+        group.method,
+        group.origin,
+        group.parts.length,
+        ...group.parts.map((part, index) =>
+          index === position || index === position + 1 ? null : partKey(part),
+        ),
+      ]);
+      const bucket = buckets.get(key);
+      if (bucket === undefined) buckets.set(key, [group]);
+      else bucket.push(group);
+    }
+    for (const bucket of buckets.values())
+      output.push(...mergePairBucket(bucket, position));
+    current = output;
+  }
+  return [...current, ...beyondLimit];
+};
+
 /** Apply the selected opt-in rules in fixed order; every merge is an inference. */
 export const applyTemplateRules = (
   groups: readonly ToolGroup[],
@@ -303,6 +396,7 @@ export const applyTemplateRules = (
     );
   current = rebucket(current);
   if (rules.has("sibling-variance")) current = mergeSiblingVariance(current);
+  if (rules.has("sibling-pair-variance")) current = mergeSiblingPairs(current);
   return current;
 };
 
@@ -342,6 +436,15 @@ const paramBaseName = (parts: readonly RoutePart[], index: number): string => {
           ? sanitizeToken(singular(previous.value))
           : "";
       return stem.length > 0 ? `${stem}_id` : "id";
+    }
+    case "sibling-pair-variance": {
+      // The pair's first position follows the plural literal; the second follows the first.
+      const second = parts[index - 1]?.kind === "param";
+      const plural = parts[second ? index - 2 : index - 1];
+      const stem =
+        plural?.kind === "literal" ? sanitizeToken(singular(plural.value)) : "";
+      const suffix = second ? "name" : "namespace";
+      return stem.length > 0 ? `${stem}_${suffix}` : suffix;
     }
   }
 };

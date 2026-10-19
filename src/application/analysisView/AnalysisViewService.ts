@@ -29,6 +29,7 @@ import { err, ok, type Result } from "../../domain/result.js";
 import { WebNetworkApiSurfaceAccumulator } from "../../domain/analysisView/WebNetworkApiSurfaceAccumulator.js";
 import { EnvironmentManifestAccumulator } from "../../domain/analysisView/EnvironmentManifestAccumulator.js";
 import { admitAnalysisViewData } from "../../domain/analysisView/analysisViewDataAdmission.js";
+import { readJsonFile } from "../JsonFiles.js";
 
 /** Authenticate a selected-view request and project already completed Evidence. */
 export const inspectAnalysisView = (
@@ -46,6 +47,48 @@ export const inspectAnalysisView = (
       ),
     );
   return inspectAnalysisViewValidated(parsed.data, lookup);
+};
+
+/** Validate a request whose source may be an Evidence file, then project it. */
+export const inspectAnalysisViewWithFiles = async (
+  rawInput: unknown,
+  lookup?: EvidenceLookup,
+): Promise<Result<Evidence, AnalysisError>> => {
+  const parsed = inspectAnalysisViewInputSchema.safeParse(rawInput);
+  if (!parsed.success)
+    return err(
+      analysisInputErrorFromIssues(
+        INSPECT_ANALYSIS_VIEW_OPERATION,
+        parsed.error.issues,
+        rawInput,
+        { cause: parsed.error },
+      ),
+    );
+  return inspectAnalysisViewValidatedWithFiles(parsed.data, lookup);
+};
+
+/**
+ * Read and authenticate an Evidence-file source, then project it as retained
+ * Evidence: its strings are bounded by the file reader rather than charged as
+ * inline input. Other sources project unchanged.
+ */
+export const inspectAnalysisViewValidatedWithFiles = async (
+  input: InspectAnalysisViewInput,
+  lookup?: EvidenceLookup,
+): Promise<Result<Evidence, AnalysisError>> => {
+  if (input.source.kind !== "evidence-file")
+    return inspectAnalysisViewValidated(input, lookup);
+  const loaded = await readJsonFile(input.source.path);
+  if (!loaded.ok) return loaded;
+  const parent = authenticateEvidence(loaded.value, ["source", "path"], {
+    source: input.source,
+  });
+  if (!parent.ok) return parent;
+  const id = parent.value.evidence_id;
+  return inspectAnalysisViewValidated(
+    { ...input, source: { kind: "retained-evidence", evidence_id: id } },
+    (evidenceId) => (evidenceId === id ? parent.value : lookup?.(evidenceId)),
+  );
 };
 
 /** Authenticate borrowed inline Evidence after adapter envelope validation. */
@@ -182,8 +225,28 @@ const resolveAnalysisViewSource = (
 ): Result<Evidence, AnalysisError> => {
   if (source.kind === "retained-evidence")
     return resolveEvidenceInput(source, lookup);
+  // Files are read by inspectAnalysisViewValidatedWithFiles, which the CLI and MCP adapters call.
+  if (source.kind === "evidence-file")
+    return err(
+      new AnalysisCapabilityUnavailableError(
+        ANALYSIS_VIEW_PROVIDER.id,
+        INSPECT_ANALYSIS_VIEW_OPERATION,
+        "evidence-file sources are read before projection",
+      ),
+    );
+  return authenticateEvidence(source.evidence, ["source", "evidence"], {
+    source,
+  });
+};
+
+/** Parse complete Evidence, reporting schema issues under the given request path. */
+const authenticateEvidence = (
+  value: unknown,
+  path: readonly (string | number)[],
+  input: unknown,
+): Result<Evidence, AnalysisError> => {
   try {
-    return ok(parseEvidence(source.evidence));
+    return ok(parseEvidence(value));
   } catch (cause: unknown) {
     if (cause instanceof z.ZodError)
       return err(
@@ -191,9 +254,9 @@ const resolveAnalysisViewSource = (
           INSPECT_ANALYSIS_VIEW_OPERATION,
           cause.issues.map((issue) => ({
             ...issue,
-            path: ["source", "evidence", ...issue.path],
+            path: [...path, ...issue.path],
           })),
-          { source },
+          input,
           { cause },
         ),
       );
